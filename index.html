@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Dutch → Papiamentu Live Subtitles</title>
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 20px; }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    button { padding: 10px 14px; cursor: pointer; }
+    .status { padding: 6px 10px; border-radius: 8px; background: #f2f2f2; }
+    .panel { margin-top: 14px; padding: 12px; border-radius: 12px; background: #fafafa; border: 1px solid #eee; }
+    .sub { font-size: 26px; line-height: 1.25; padding: 12px; border-radius: 12px; background: #000; color: #fff; min-height: 80px; }
+    .small { font-size: 12px; color: #555; }
+    textarea { width: 100%; min-height: 90px; }
+  </style>
+</head>
+<body>
+  <h1>Dutch → Papiamentu (Live Subtitles)</h1>
+
+  <div class="row">
+    <button id="startBtn">Start</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <span class="status" id="status">Idle</span>
+  </div>
+
+  <div class="panel">
+    <div class="small">Live Papiamentu subtitles</div>
+    <div class="sub" id="subtitle">—</div>
+  </div>
+
+  <div class="panel">
+    <div class="small">Debug (optional): last Dutch transcript</div>
+    <textarea id="lastDutch" readonly></textarea>
+  </div>
+
+  <script>
+    // --- Config you may tweak ---
+    const TOKEN_ENDPOINT = "/token"; // your backend endpoint
+    const REALTIME_CALLS_URL = "https://api.openai.com/v1/realtime/calls"; // WebRTC SDP exchange endpoint :contentReference[oaicite:1]{index=1}
+
+    // Choose a realtime model supported on your account (doc examples use "gpt-realtime") :contentReference[oaicite:2]{index=2}
+    const REALTIME_MODEL = "gpt-realtime";
+
+    // Transcription model for Dutch input audio (supports incremental deltas) :contentReference[oaicite:3]{index=3}
+    const TRANSCRIBE_MODEL = "gpt-4o-mini-transcribe";
+    const INPUT_LANGUAGE_ISO = "nl"; // Dutch
+
+    // Subtitle translation instructions
+    const TRANSLATE_INSTRUCTIONS = `
+You are a live subtitle translator.
+Task: translate from Dutch to Papiamentu.
+Rules:
+- Output ONLY the Papiamentu translation (no Dutch, no explanations).
+- Keep it short and subtitle-friendly.
+- Keep names unchanged.
+- Use consistent spelling (Curaçao-style is fine).
+`;
+
+    // --- State ---
+    let pc = null;
+    let dc = null;
+    let micStream = null;
+    let running = false;
+
+    const $ = (id) => document.getElementById(id);
+    const startBtn = $("startBtn");
+    const stopBtn  = $("stopBtn");
+    const statusEl = $("status");
+    const subtitleEl = $("subtitle");
+    const lastDutchEl = $("lastDutch");
+
+    function setStatus(s) { statusEl.textContent = s; }
+    function setSubtitle(s) { subtitleEl.textContent = s || "—"; }
+    function logDutch(s) { lastDutchEl.value = s || ""; }
+
+    function sendEvent(obj) {
+      if (!dc || dc.readyState !== "open") return;
+      dc.send(JSON.stringify(obj));
+    }
+
+    // When we get a completed Dutch transcript, ask the model to translate it (as a text-only response).
+    // We listen for response.output_text.delta to render subtitles as they stream. :contentReference[oaicite:4]{index=4}
+    function requestTranslation(dutchText) {
+      const prompt = `${TRANSLATE_INSTRUCTIONS}\n\nDutch:\n"""${dutchText}"""\n\nPapiamentu:`;
+      sendEvent({
+        type: "response.create",
+        response: {
+          conversation: "none",
+          output_modalities: ["text"],
+          instructions: prompt
+        }
+      });
+    }
+
+    function handleServerEvent(evt) {
+      // Helpful: show all events in console if you want
+      // console.log(evt);
+
+      // Input audio transcription (Dutch) events :contentReference[oaicite:5]{index=5}
+      if (evt.type === "conversation.item.input_audio_transcription.delta") {
+        // optional: you could show partial Dutch here, but we keep it simple
+        return;
+      }
+
+      if (evt.type === "conversation.item.input_audio_transcription.completed") {
+        const dutch = evt.transcript || "";
+        if (dutch.trim()) {
+          logDutch(dutch);
+          // Trigger translation request
+          requestTranslation(dutch);
+        }
+        return;
+      }
+
+      // Output text streaming events for the translation :contentReference[oaicite:6]{index=6}
+      if (evt.type === "response.output_text.delta") {
+        setSubtitle((subtitleEl.textContent === "—" ? "" : subtitleEl.textContent) + (evt.delta || ""));
+        return;
+      }
+
+      if (evt.type === "response.output_text.done") {
+        // Ensure subtitle ends cleanly
+        setSubtitle((evt.text || subtitleEl.textContent || "").trim());
+        return;
+      }
+
+      if (evt.type === "error") {
+        console.error("Realtime error:", evt);
+        setStatus("Error (check console)");
+      }
+    }
+
+    async function start() {
+      if (running) return;
+      running = true;
+      setStatus("Requesting mic…");
+      setSubtitle("—");
+      logDutch("");
+
+      // 1) Get mic
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      // 2) Get ephemeral client secret from your backend :contentReference[oaicite:7]{index=7}
+      setStatus("Getting session token…");
+      const tokenRes = await fetch(TOKEN_ENDPOINT, { method: "GET" });
+      if (!tokenRes.ok) throw new Error("Token endpoint failed: " + tokenRes.status);
+      const tokenData = await tokenRes.json();
+
+      // Per docs, the returned object includes a short-lived value used as Bearer for realtime calls. :contentReference[oaicite:8]{index=8}
+      const EPHEMERAL_KEY = tokenData.value;
+      if (!EPHEMERAL_KEY) throw new Error("Token response missing .value");
+
+      // 3) Create WebRTC connection
+      setStatus("Connecting…");
+      pc = new RTCPeerConnection();
+
+      // Add microphone track
+      pc.addTrack(micStream.getTracks()[0], micStream);
+
+      // Data channel for events
+      dc = pc.createDataChannel("oai-events");
+      dc.addEventListener("open", () => {
+        setStatus("Connected. Speak Dutch!");
+        // Configure session: enable input audio transcription in Dutch, using transcribe model. :contentReference[oaicite:9]{index=9}
+        sendEvent({
+          type: "session.update",
+          session: {
+            model: REALTIME_MODEL,
+            audio: {
+              input: {
+                transcription: {
+                  model: TRANSCRIBE_MODEL,
+                  language: INPUT_LANGUAGE_ISO
+                },
+                turn_detection: {
+                  type: "server_vad",
+                  threshold: 0.5,
+                  prefix_padding_ms: 300,
+                  silence_duration_ms: 500
+                }
+              }
+            }
+          }
+        });
+      });
+
+      dc.addEventListener("message", (e) => {
+        try {
+          const evt = JSON.parse(e.data);
+          handleServerEvent(evt);
+        } catch (err) {
+          console.warn("Bad event JSON:", e.data);
+        }
+      });
+
+      // SDP offer/answer exchange with OpenAI Realtime calls endpoint :contentReference[oaicite:10]{index=10}
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      const sdpRes = await fetch(`${REALTIME_CALLS_URL}?model=${encodeURIComponent(REALTIME_MODEL)}`, {
+        method: "POST",
+        body: offer.sdp,
+        headers: {
+          "Authorization": `Bearer ${EPHEMERAL_KEY}`,
+          "Content-Type": "application/sdp"
+        }
+      });
+
+      if (!sdpRes.ok) {
+        const text = await sdpRes.text();
+        throw new Error(`Realtime calls failed: ${sdpRes.status} ${text}`);
+      }
+
+      const answer = { type: "answer", sdp: await sdpRes.text() };
+      await pc.setRemoteDescription(answer);
+
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+    }
+
+    async function stop() {
+      running = false;
+      setStatus("Stopping…");
+
+      if (dc) { try { dc.close(); } catch {} dc = null; }
+      if (pc) { try { pc.close(); } catch {} pc = null; }
+
+      if (micStream) {
+        micStream.getTracks().forEach(t => t.stop());
+        micStream = null;
+      }
+
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      setStatus("Idle");
+    }
+
+    startBtn.onclick = () => start().catch(err => {
+      console.error(err);
+      setStatus("Error (check console)");
+      running = false;
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+    });
+
+    stopBtn.onclick = () => stop();
+  </script>
+</body>
+</html>
