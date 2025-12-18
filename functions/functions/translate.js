@@ -1,9 +1,30 @@
-export async function onRequestPost(context) {
+export async function onRequest(context) {
+  if (context.request.method === "OPTIONS") {
+    return new Response(null, {
+      status: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+      },
+    });
+  }
+
+  if (context.request.method !== "POST") {
+    return new Response(JSON.stringify({ error: "Use POST" }), {
+      status: 405,
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+  }
+
   const apiKey = context.env.OPENAI_API_KEY;
   if (!apiKey) {
     return new Response(JSON.stringify({ error: "Missing OPENAI_API_KEY" }), {
       status: 500,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
     });
   }
 
@@ -13,7 +34,7 @@ export async function onRequestPost(context) {
   } catch {
     return new Response(JSON.stringify({ error: "Invalid JSON body" }), {
       status: 400,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
     });
   }
 
@@ -21,17 +42,15 @@ export async function onRequestPost(context) {
   if (!dutch) {
     return new Response(JSON.stringify({ error: "Missing text" }), {
       status: 400,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
     });
   }
 
-  // Translation prompt (strong + consistent)
   const prompt =
     "Translate the following Dutch into Papiamentu.\n" +
     "Return ONLY the Papiamentu translation. No quotes. No extra text.\n\n" +
     "Dutch:\n" + dutch;
 
-  // Use Responses API (simple + consistent)
   const r = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -50,11 +69,10 @@ export async function onRequestPost(context) {
   if (!r.ok) {
     return new Response(JSON.stringify({ error: "OpenAI error", status: r.status, raw: json }), {
       status: 500,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
     });
   }
 
-  // Extract text safely from Responses API
   let out = "";
   try {
     const parts = json.output?.[0]?.content || [];
@@ -68,12 +86,12 @@ export async function onRequestPost(context) {
   if (!out) {
     return new Response(JSON.stringify({ error: "Empty translation", raw: json }), {
       status: 500,
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
     });
   }
 
   return new Response(JSON.stringify({ translation: out }), {
     status: 200,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
   });
 }
