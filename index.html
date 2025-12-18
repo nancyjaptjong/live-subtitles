@@ -1,256 +1,226 @@
-<script>
-  // ===== Config =====
-  const TOKEN_ENDPOINT = "/token"; // Cloudflare function at /functions/token.js => /token
-  const SOURCE_LANGUAGE = "nl";     // Dutch input
-  const TARGET_LANGUAGE = "pap";    // Papiamentu output (best effort)
-
-  // ===== UI =====
-  const startBtn = document.getElementById("startBtn");
-  const stopBtn  = document.getElementById("stopBtn");
-  const statusEl = document.getElementById("status");
-
-  function setStatus(msg) {
-    if (statusEl) statusEl.textContent = msg;
-  }
-
-  // ===== State =====
-  let pc = null;
-  let dc = null;
-  let localStream = null;
-
-  // Try to find a subtitle element if you already have one
-  // (If you don't, the script will create a bottom subtitle bar automatically)
-  let subtitleEl =
-    document.getElementById("subtitle") ||
-    document.getElementById("subtitles") ||
-    document.getElementById("caption") ||
-    document.getElementById("captions") ||
-    null;
-
-  function ensureSubtitleBar() {
-    if (subtitleEl) return subtitleEl;
-
-    subtitleEl = document.createElement("div");
-    subtitleEl.id = "subtitle";
-    subtitleEl.style.position = "fixed";
-    subtitleEl.style.left = "0";
-    subtitleEl.style.right = "0";
-    subtitleEl.style.bottom = "0";
-    subtitleEl.style.padding = "18px 24px";
-    subtitleEl.style.fontSize = "32px";
-    subtitleEl.style.lineHeight = "1.2";
-    subtitleEl.style.fontFamily = "system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif";
-    subtitleEl.style.background = "rgba(0,0,0,0.75)";
-    subtitleEl.style.color = "white";
-    subtitleEl.style.textAlign = "center";
-    subtitleEl.style.zIndex = "9999";
-    subtitleEl.style.userSelect = "none";
-    subtitleEl.textContent = "";
-
-    document.body.appendChild(subtitleEl);
-    return subtitleEl;
-  }
-
-  function setSubtitle(text) {
-    const el = ensureSubtitleBar();
-    el.textContent = text || "";
-  }
-
-  // ===== Helpers =====
-  async function getEphemeralKey() {
-    const resp = await fetch(TOKEN_ENDPOINT, { cache: "no-store" });
-    if (!resp.ok) {
-      const t = await resp.text();
-      throw new Error(`Token endpoint error (${resp.status}): ${t}`);
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Live Dutch → Papiamentu Subtitles</title>
+  <style>
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    .topbar {
+      position: fixed; top: 0; left: 0; right: 0;
+      padding: 12px 16px;
+      background: #111; color: #fff;
+      display: flex; gap: 10px; align-items: center;
+      z-index: 10000;
     }
-    const data = await resp.json();
-    const key = data.value ?? data.client_secret?.value;
-    if (!key) throw new Error("No ephemeral key returned from /token");
-    return key;
-  }
-
-  function safeJsonParse(s) {
-    try { return JSON.parse(s); } catch { return null; }
-  }
-
-  // ===== Realtime WebRTC Connect =====
-  async function start() {
-    try {
-      setStatus("Requesting mic…");
-      startBtn.disabled = true;
-      stopBtn.disabled = false;
-
-      // 1) Get ephemeral key
-      const EPHEMERAL_KEY = await getEphemeralKey();
-
-      // 2) Capture microphone
-      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      setStatus("Connecting…");
-
-      // 3) WebRTC Peer Connection
-      pc = new RTCPeerConnection();
-
-      // Send mic audio to OpenAI
-      localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-
-      // Receive remote audio if the model sends any (optional)
-      pc.ontrack = (event) => {
-        // If you want to play model audio, uncomment:
-        // const audio = document.createElement("audio");
-        // audio.autoplay = true;
-        // audio.srcObject = event.streams[0];
-        // document.body.appendChild(audio);
-      };
-
-      // 4) Data channel for events (text, transcripts, etc.)
-      dc = pc.createDataChannel("oai-events");
-
-      dc.onopen = () => {
-        setStatus("Live");
-        // Configure the session: ask for subtitles in Papiamentu from Dutch speech
-        // We instruct the model to act like a real-time subtitle translator.
-        const instructions =
-          `You are a live subtitle translator. The speaker talks in Dutch. ` +
-          `Output ONLY the translated subtitle in Papiamentu. ` +
-          `No explanations. Keep it short, natural, and readable.`;
-
-        dc.send(JSON.stringify({
-          type: "session.update",
-          session: {
-            // These names can vary by Realtime version; harmless if ignored.
-            instructions,
-            input_audio_transcription: { model: "gpt-4o-mini-transcribe", language: SOURCE_LANGUAGE },
-            // We'll request text outputs for subtitles
-            modalities: ["text"]
-          }
-        }));
-
-        // Kick off continuous transcription/translation behavior.
-        // Some Realtime builds respond better when you explicitly request.
-        dc.send(JSON.stringify({
-          type: "response.create",
-          response: {
-            modalities: ["text"],
-            instructions:
-              `Start now. As you receive Dutch speech, stream the Papiamentu subtitle.` +
-              ` Output only subtitle text.`,
-          }
-        }));
-      };
-
-      dc.onmessage = (event) => {
-        // Realtime sends JSON event objects
-        const msg = safeJsonParse(event.data);
-        if (!msg) return;
-
-        // You'll see lots of different event types; we only care about text deltas/final
-        // Common patterns include: response.output_text.delta / response.output_text.done
-        // We'll handle multiple possible shapes safely.
-
-        // 1) Output text delta
-        if (msg.type === "response.output_text.delta" && typeof msg.delta === "string") {
-          // Append streaming subtitle
-          setSubtitle((ensureSubtitleBar().textContent || "") + msg.delta);
-          return;
-        }
-
-        // 2) Output text done (final)
-        if (msg.type === "response.output_text.done") {
-          // Some builds send final text in msg.text
-          if (typeof msg.text === "string" && msg.text.trim()) {
-            setSubtitle(msg.text.trim());
-          }
-          return;
-        }
-
-        // 3) Some builds send content blocks in response.completed
-        if (msg.type === "response.completed") {
-          const text =
-            msg?.response?.output?.[0]?.content?.find?.(c => c.type === "output_text")?.text ||
-            msg?.response?.output_text ||
-            null;
-          if (typeof text === "string" && text.trim()) {
-            setSubtitle(text.trim());
-          }
-          return;
-        }
-
-        // 4) If you want to see what events are coming in:
-        // console.log("Realtime event:", msg);
-      };
-
-      dc.onerror = (e) => {
-        console.error("DataChannel error:", e);
-        setStatus("Error (data channel)");
-      };
-
-      // 5) Create offer and send to OpenAI Realtime
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-
-      const baseUrl = "https://api.openai.com/v1/realtime";
-      const model = "gpt-realtime"; // server-side model choice (matches /token)
-      const sdpResp = await fetch(`${baseUrl}?model=${encodeURIComponent(model)}`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${EPHEMERAL_KEY}`,
-          "Content-Type": "application/sdp"
-        },
-        body: offer.sdp
-      });
-
-      if (!sdpResp.ok) {
-        const t = await sdpResp.text();
-        throw new Error(`Realtime SDP exchange failed (${sdpResp.status}): ${t}`);
-      }
-
-      const answerSdp = await sdpResp.text();
-      await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
-
-      setStatus("Live");
-    } catch (err) {
-      console.error(err);
-      setStatus("Error (check console)");
-      startBtn.disabled = false;
-      stopBtn.disabled = true;
+    button { padding: 10px 14px; font-size: 16px; cursor: pointer; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .status { margin-left: auto; opacity: 0.9; }
+    .page {
+      padding-top: 64px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: calc(100vh - 64px);
+      text-align: center;
+      color: #333;
     }
-  }
+    #subtitleBar {
+      position: fixed; left: 0; right: 0; bottom: 0;
+      padding: 18px 24px;
+      font-size: 32px;
+      line-height: 1.2;
+      background: rgba(0,0,0,0.75);
+      color: #fff;
+      text-align: center;
+      z-index: 9999;
+      user-select: none;
+      min-height: 56px;
+    }
+    /* Presentation mode */
+    body.presentation .topbar { display: none; }
+    body.presentation .page { padding-top: 0; min-height: 100vh; }
+  </style>
+</head>
 
-  async function stop() {
-    try {
-      setStatus("Stopping…");
-      stopBtn.disabled = true;
+<body>
+  <div class="topbar">
+    <button id="startBtn">Start</button>
+    <button id="stopBtn" disabled>Stop</button>
+    <span class="status" id="status">Idle</span>
+  </div>
 
-      if (dc) {
-        try { dc.close(); } catch {}
-        dc = null;
-      }
+  <div class="page">
+    <div>
+      <h1 style="margin: 0 0 8px;">Live Dutch → Papiamentu Subtitles</h1>
+      <p style="margin: 0; opacity: 0.8;">
+        Click <b>Start</b>, allow microphone, then speak Dutch.
+      </p>
+      <p style="margin: 12px 0 0; opacity: 0.7; font-size: 14px;">
+        Presentation mode: add <code>?presentation=true</code> to the URL.
+      </p>
+    </div>
+  </div>
 
-      if (pc) {
-        try { pc.close(); } catch {}
-        pc = null;
-      }
+  <div id="subtitleBar"></div>
 
-      if (localStream) {
-        localStream.getTracks().forEach(t => {
-          try { t.stop(); } catch {}
+  <script>
+    // ===== Config =====
+    const TOKEN_ENDPOINT = "/token";
+    const SOURCE_LANGUAGE = "nl"; // Dutch
+
+    // Presentation mode
+    const params = new URLSearchParams(location.search);
+    if (params.get("presentation") === "true") document.body.classList.add("presentation");
+
+    // ===== UI =====
+    const startBtn = document.getElementById("startBtn");
+    const stopBtn  = document.getElementById("stopBtn");
+    const statusEl = document.getElementById("status");
+    const subtitleBar = document.getElementById("subtitleBar");
+
+    function setStatus(msg) { statusEl.textContent = msg; }
+    function setSubtitle(text) { subtitleBar.textContent = text || ""; }
+    function safeJsonParse(s) { try { return JSON.parse(s); } catch { return null; } }
+
+    // ===== State =====
+    let pc = null;
+    let dc = null;
+    let localStream = null;
+
+    async function getEphemeralKey() {
+      const resp = await fetch(TOKEN_ENDPOINT, { cache: "no-store" });
+      if (!resp.ok) throw new Error(`Token endpoint error: ${resp.status} ${await resp.text()}`);
+      const data = await resp.json();
+      const key = data.value ?? data.client_secret?.value;
+      if (!key) throw new Error("No ephemeral key returned from /token");
+      return key;
+    }
+
+    async function start() {
+      try {
+        startBtn.disabled = true;
+        stopBtn.disabled = false;
+        setStatus("Requesting mic…");
+        setSubtitle("");
+
+        const EPHEMERAL_KEY = await getEphemeralKey();
+
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        setStatus("Connecting…");
+
+        pc = new RTCPeerConnection();
+        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+
+        dc = pc.createDataChannel("oai-events");
+
+        dc.onopen = () => {
+          setStatus("Live");
+
+          const instructions =
+            "You are a live subtitle translator. The speaker talks in Dutch. " +
+            "Output ONLY the translated subtitle in Papiamentu. " +
+            "No explanations. Keep it short and readable.";
+
+          // Configure the session
+          dc.send(JSON.stringify({
+            type: "session.update",
+            session: {
+              instructions,
+              input_audio_transcription: { model: "gpt-4o-mini-transcribe", language: SOURCE_LANGUAGE },
+              modalities: ["text"]
+            }
+          }));
+
+          // Start generating text
+          dc.send(JSON.stringify({
+            type: "response.create",
+            response: {
+              modalities: ["text"],
+              instructions: "Begin translating now. Output only Papiamentu subtitles."
+            }
+          }));
+        };
+
+        dc.onmessage = (event) => {
+          const msg = safeJsonParse(event.data);
+          if (!msg) return;
+
+          // Streaming delta text
+          if (msg.type === "response.output_text.delta" && typeof msg.delta === "string") {
+            setSubtitle((subtitleBar.textContent || "") + msg.delta);
+            return;
+          }
+
+          // Final text
+          if (msg.type === "response.output_text.done") {
+            if (typeof msg.text === "string" && msg.text.trim()) setSubtitle(msg.text.trim());
+            return;
+          }
+
+          // Completed response (alt shape)
+          if (msg.type === "response.completed") {
+            const text =
+              msg?.response?.output?.[0]?.content?.find?.(c => c.type === "output_text")?.text ||
+              msg?.response?.output_text ||
+              null;
+            if (typeof text === "string" && text.trim()) setSubtitle(text.trim());
+          }
+        };
+
+        // SDP exchange
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+
+        const baseUrl = "https://api.openai.com/v1/realtime";
+        const model = "gpt-realtime";
+
+        const sdpResp = await fetch(`${baseUrl}?model=${encodeURIComponent(model)}`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${EPHEMERAL_KEY}`,
+            "Content-Type": "application/sdp"
+          },
+          body: offer.sdp
         });
-        localStream = null;
+
+        if (!sdpResp.ok) throw new Error(`Realtime SDP exchange failed: ${sdpResp.status} ${await sdpResp.text()}`);
+
+        const answerSdp = await sdpResp.text();
+        await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+
+        setStatus("Live");
+      } catch (err) {
+        console.error(err);
+        setStatus("Error (check console)");
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
       }
-
-      setSubtitle("");
-      setStatus("Idle");
-    } finally {
-      startBtn.disabled = false;
-      stopBtn.disabled = true;
     }
-  }
 
-  // Wire buttons
-  startBtn.addEventListener("click", start);
-  stopBtn.addEventListener("click", stop);
+    async function stop() {
+      try {
+        setStatus("Stopping…");
+        stopBtn.disabled = true;
 
-  // Initial UI state
-  setStatus("Idle");
-  stopBtn.disabled = true;
-</script>
+        if (dc) { try { dc.close(); } catch {} dc = null; }
+        if (pc) { try { pc.close(); } catch {} pc = null; }
+
+        if (localStream) {
+          localStream.getTracks().forEach(t => { try { t.stop(); } catch {} });
+          localStream = null;
+        }
+
+        setSubtitle("");
+        setStatus("Idle");
+      } finally {
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+      }
+    }
+
+    startBtn.addEventListener("click", start);
+    stopBtn.addEventListener("click", stop);
+  </script>
+</body>
+</html>
