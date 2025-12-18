@@ -55,7 +55,7 @@
         Presentation mode: <code>?presentation=true</code>
       </p>
       <p style="margin:12px 0 0; opacity:.7; font-size:14px;">
-        Note: This uses your browser’s Dutch speech recognition (Chrome/Edge work best).
+        Tip: Chrome/Edge work best for Dutch speech recognition.
       </p>
     </div>
   </div>
@@ -66,7 +66,7 @@
   <script>
     // ========= Config =========
     const TOKEN_ENDPOINT = "/token";
-    const MODEL = "gpt-realtime"; // matches your token function
+    const MODEL = "gpt-realtime";
     const DUTCH_LOCALE = "nl-NL";
 
     // Presentation mode
@@ -91,6 +91,7 @@
     let dc = null;
     let recognition = null;
     let lastFinalDutch = "";
+    let micStream = null;
 
     // ========= Token =========
     async function getEphemeralKey(){
@@ -103,24 +104,35 @@
       return key;
     }
 
-    // ========= OpenAI Realtime (data channel) =========
-    async function connectRealtime(){
+    // ========= OpenAI Realtime (WebRTC) =========
+    async function connectRealtimeWithMic(){
+      // 1) ephemeral key
       const EPHEMERAL_KEY = await getEphemeralKey();
 
+      // 2) Create peer connection
       pc = new RTCPeerConnection();
+
+      // 3) IMPORTANT: Add mic audio track BEFORE creating offer
+      // This guarantees the SDP offer includes an audio media section (m=audio).
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStream.getTracks().forEach(track => pc.addTrack(track, micStream));
+
+      // 4) Data channel for events
       dc = pc.createDataChannel("oai-events");
 
       dc.onopen = () => {
         setStatus("Live");
-        // Tell the model exactly what we want.
+
+        const instructions =
+          "You are a live subtitle translator. " +
+          "You will receive Dutch text. " +
+          "Return ONLY the Papiamentu translation as a subtitle. " +
+          "No explanations. Keep it short and natural.";
+
         dc.send(JSON.stringify({
           type: "session.update",
           session: {
-            instructions:
-              "You are a live subtitle translator. " +
-              "You will receive Dutch text. " +
-              "Return ONLY the Papiamentu translation as a subtitle. " +
-              "No explanations. Keep it short and natural.",
+            instructions,
             modalities: ["text"]
           }
         }));
@@ -130,19 +142,14 @@
         const m = safeJsonParse(e.data);
         if (!m) return;
 
-        // Stream subtitle text (delta)
         if (m.type === "response.output_text.delta" && typeof m.delta === "string") {
           setSubtitle((subtitleBar.textContent || "") + m.delta);
           return;
         }
-
-        // Final subtitle
-        if (m.type === "response.output_text.done") {
-          if (typeof m.text === "string" && m.text.trim()) setSubtitle(m.text.trim());
+        if (m.type === "response.output_text.done" && typeof m.text === "string" && m.text.trim()) {
+          setSubtitle(m.text.trim());
           return;
         }
-
-        // Alternate final shape
         if (m.type === "response.completed") {
           const t =
             m?.response?.output?.[0]?.content?.find?.(c => c.type === "output_text")?.text ||
@@ -152,7 +159,7 @@
         }
       };
 
-      // SDP offer/answer
+      // 5) SDP exchange
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
@@ -167,6 +174,7 @@
 
       const sdpText = await sdpResp.text();
       if (!sdpResp.ok) throw new Error(`Realtime failed ${sdpResp.status}: ${sdpText}`);
+
       await pc.setRemoteDescription({ type: "answer", sdp: sdpText });
     }
 
@@ -174,10 +182,8 @@
     function sendDutchForTranslation(dutchText){
       if (!dc || dc.readyState !== "open") return;
 
-      // Clear subtitle bar so new subtitle starts clean
       setSubtitle("");
 
-      // Create a user message in the conversation
       dc.send(JSON.stringify({
         type: "conversation.item.create",
         item: {
@@ -187,7 +193,6 @@
         }
       }));
 
-      // Ask for a text response (subtitle)
       dc.send(JSON.stringify({
         type: "response.create",
         response: { modalities: ["text"] }
@@ -197,9 +202,7 @@
     // ========= Browser SpeechRecognition (Dutch) =========
     function startSpeechRecognition(){
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (!SR) {
-        throw new Error("SpeechRecognition not supported. Use Chrome or Edge on desktop.");
-      }
+      if (!SR) throw new Error("SpeechRecognition not supported. Use Chrome or Edge on desktop.");
 
       recognition = new SR();
       recognition.lang = DUTCH_LOCALE;
@@ -251,7 +254,7 @@
         setDebug("");
         setStatus("Connecting…");
 
-        await connectRealtime();
+        await connectRealtimeWithMic();     // ✅ now includes audio m-line
         startSpeechRecognition();
 
         setStatus("Live");
@@ -277,6 +280,11 @@
         if (dc) { try { dc.close(); } catch {} dc = null; }
         if (pc) { try { pc.close(); } catch {} pc = null; }
 
+        if (micStream) {
+          micStream.getTracks().forEach(t => { try { t.stop(); } catch {} });
+          micStream = null;
+        }
+
         setSubtitle("");
         setDebug("");
         setStatus("Idle");
@@ -286,7 +294,6 @@
       }
     }
 
-    // Wire buttons
     startBtn.onclick = startAll;
     stopBtn.onclick = stopAll;
 
