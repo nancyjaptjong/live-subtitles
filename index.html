@@ -5,36 +5,61 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Live Dutch → Papiamentu Subtitles</title>
   <style>
-    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
-    .topbar{
-      position:fixed; top:0; left:0; right:0;
-      padding:12px 16px;
-      background:#111; color:#fff;
-      display:flex; gap:10px; align-items:center;
-      z-index:10000;
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
     }
-    button{ padding:10px 14px; font-size:16px; cursor:pointer; }
-    button:disabled{ opacity:.55; cursor:not-allowed; }
-    .status{ margin-left:auto; opacity:.95; }
-    .page{
-      padding-top:64px;
-      min-height:calc(100vh - 64px);
-      display:flex; align-items:center; justify-content:center;
-      text-align:center; color:#333;
+    .topbar {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      padding: 12px 16px;
+      background: #111;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      z-index: 10000;
     }
-    #subtitleBar{
-      position:fixed; left:0; right:0; bottom:0;
-      padding:18px 24px;
-      font-size:32px; line-height:1.2;
-      background:rgba(0,0,0,.75);
-      color:#fff; text-align:center;
-      z-index:9999;
-      user-select:none;
-      min-height:56px;
-      white-space:pre-wrap;
+    button {
+      padding: 10px 14px;
+      font-size: 16px;
+      cursor: pointer;
     }
-    body.presentation .topbar { display:none; }
-    body.presentation .page { padding-top:0; min-height:100vh; }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .status {
+      margin-left: auto;
+    }
+    .page {
+      padding-top: 64px;
+      min-height: calc(100vh - 64px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      color: #333;
+    }
+    #subtitleBar {
+      position: fixed;
+      left: 0; right: 0; bottom: 0;
+      padding: 18px 24px;
+      font-size: 32px;
+      line-height: 1.2;
+      background: rgba(0,0,0,0.75);
+      color: #fff;
+      text-align: center;
+      z-index: 9999;
+      min-height: 56px;
+      user-select: none;
+      white-space: pre-wrap;
+    }
+    body.presentation .topbar { display: none; }
+    body.presentation .page {
+      padding-top: 0;
+      min-height: 100vh;
+    }
   </style>
 </head>
 
@@ -47,12 +72,10 @@
 
   <div class="page">
     <div>
-      <h1 style="margin:0 0 8px;">Live Dutch → Papiamentu Subtitles</h1>
-      <p style="margin:0; opacity:.8;">
-        Click <b>Start</b>, allow microphone, then speak Dutch.
-      </p>
-      <p style="margin:12px 0 0; opacity:.7; font-size:14px;">
-        Presentation mode: add <code>?presentation=true</code> to the URL.
+      <h1>Live Dutch → Papiamentu Subtitles</h1>
+      <p>Click <b>Start</b>, allow microphone, then speak Dutch.</p>
+      <p style="opacity:.7;font-size:14px;">
+        Presentation mode: add <code>?presentation=true</code>
       </p>
     </div>
   </div>
@@ -60,144 +83,131 @@
   <div id="subtitleBar"></div>
 
   <script>
-    // ========================
+    // =========================
     // CONFIG
-    // ========================
-    const TOKEN_ENDPOINT = "/token";   // Cloudflare Pages Function
-    const SOURCE_LANGUAGE = "nl";      // Dutch
+    // =========================
+    const TOKEN_ENDPOINT = "/token";
+    const SOURCE_LANGUAGE = "nl";
 
     // Presentation mode
     const params = new URLSearchParams(location.search);
-    if (params.get("presentation") === "true") document.body.classList.add("presentation");
+    if (params.get("presentation") === "true") {
+      document.body.classList.add("presentation");
+    }
 
-    // ========================
+    // =========================
     // UI
-    // ========================
+    // =========================
     const startBtn = document.getElementById("startBtn");
     const stopBtn  = document.getElementById("stopBtn");
     const statusEl = document.getElementById("status");
     const subtitleBar = document.getElementById("subtitleBar");
 
-    function setStatus(msg){ statusEl.textContent = msg; }
-    function setSubtitle(text){ subtitleBar.textContent = text || ""; }
+    function setStatus(msg) {
+      statusEl.textContent = msg;
+    }
 
-    // ========================
+    function setSubtitle(text) {
+      subtitleBar.textContent = text || "";
+    }
+
+    function safeJsonParse(s) {
+      try { return JSON.parse(s); } catch { return null; }
+    }
+
+    // =========================
     // STATE
-    // ========================
+    // =========================
     let pc = null;
     let dc = null;
     let localStream = null;
 
-    // ========================
-    // HELPERS
-    // ========================
-    function safeJsonParse(s){ try { return JSON.parse(s); } catch { return null; } }
-
-    async function getEphemeralKey(){
-      const resp = await fetch(TOKEN_ENDPOINT, { cache: "no-store" });
-      const text = await resp.text();
-      if (!resp.ok) {
-        throw new Error(`Token endpoint error (${resp.status}): ${text}`);
-      }
-      const data = safeJsonParse(text);
-      const key = data?.value ?? data?.client_secret?.value;
-      if (!key) throw new Error("No ephemeral key returned from /token");
+    // =========================
+    // TOKEN
+    // =========================
+    async function getEphemeralKey() {
+      const r = await fetch(TOKEN_ENDPOINT, { cache: "no-store" });
+      const t = await r.text();
+      if (!r.ok) throw new Error(`Token error ${r.status}: ${t}`);
+      const j = safeJsonParse(t);
+      const key = j?.value ?? j?.client_secret?.value;
+      if (!key) throw new Error("No ephemeral key returned");
       return key;
     }
 
-    // ========================
-    // MAIN
-    // ========================
-    async function startSubtitles(){
-      try{
+    // =========================
+    // START
+    // =========================
+    async function startSubtitles() {
+      try {
         startBtn.disabled = true;
         stopBtn.disabled = false;
         setSubtitle("");
+        setStatus("Requesting microphone…");
 
-        setStatus("Requesting mic…");
         const EPHEMERAL_KEY = await getEphemeralKey();
-
-        // Mic
         localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
         setStatus("Connecting…");
 
-        // WebRTC
         pc = new RTCPeerConnection();
+        localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
 
-        // send mic audio to OpenAI
-        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
-
-        // data channel for events
         dc = pc.createDataChannel("oai-events");
 
         dc.onopen = () => {
           setStatus("Live");
 
           const instructions =
-            "You are a live subtitle translator. The speaker talks in Dutch. " +
-            "Output ONLY the translated subtitle in Papiamentu. " +
-            "No explanations. Keep it short and readable.";
+            "You are a live subtitle translator. " +
+            "Translate spoken Dutch into Papiamentu. " +
+            "Output ONLY the subtitle text.";
 
-          // configure session
           dc.send(JSON.stringify({
             type: "session.update",
             session: {
               instructions,
-              input_audio_transcription: { model: "gpt-4o-mini-transcribe", language: SOURCE_LANGUAGE },
+              input_audio_transcription: {
+                model: "gpt-4o-mini-transcribe",
+                language: SOURCE_LANGUAGE
+              },
               modalities: ["text"]
             }
           }));
 
-          // start producing text
           dc.send(JSON.stringify({
             type: "response.create",
             response: {
               modalities: ["text"],
-              instructions: "Begin translating now. Output only Papiamentu subtitles."
+              instructions: "Start translating now."
             }
           }));
         };
 
-        dc.onmessage = (event) => {
-          const msg = safeJsonParse(event.data);
-          if (!msg) return;
+        dc.onmessage = (e) => {
+          const m = safeJsonParse(e.data);
+          if (!m) return;
 
-          // Streaming text updates
-          if (msg.type === "response.output_text.delta" && typeof msg.delta === "string") {
-            setSubtitle((subtitleBar.textContent || "") + msg.delta);
-            return;
+          if (m.type === "response.output_text.delta") {
+            setSubtitle(subtitleBar.textContent + (m.delta || ""));
           }
 
-          // Final text
-          if (msg.type === "response.output_text.done") {
-            if (typeof msg.text === "string" && msg.text.trim()) setSubtitle(msg.text.trim());
-            return;
+          if (m.type === "response.output_text.done" && m.text) {
+            setSubtitle(m.text.trim());
           }
 
-          // Alternate final shape
-          if (msg.type === "response.completed") {
-            const text =
-              msg?.response?.output?.[0]?.content?.find?.(c => c.type === "output_text")?.text ||
-              msg?.response?.output_text ||
-              null;
-            if (typeof text === "string" && text.trim()) setSubtitle(text.trim());
+          if (m.type === "response.completed") {
+            const t =
+              m?.response?.output?.[0]?.content?.find?.(c => c.type === "output_text")?.text;
+            if (t) setSubtitle(t.trim());
           }
         };
 
-        dc.onerror = (e) => {
-          console.error("DataChannel error:", e);
-          setStatus("ERROR: data channel");
-        };
-
-        // SDP exchange
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
 
-        const baseUrl = "https://api.openai.com/v1/realtime";
-        const model = "gpt-realtime";
-
-        const sdpResp = await fetch(`${baseUrl}?model=${encodeURIComponent(model)}`, {
+        // ✅ CORRECT ENDPOINT
+        const sdpResp = await fetch("https://api.openai.com/v1/realtime/calls", {
           method: "POST",
           headers: {
             Authorization: `Bearer ${EPHEMERAL_KEY}`,
@@ -208,29 +218,32 @@
 
         const sdpText = await sdpResp.text();
         if (!sdpResp.ok) {
-          throw new Error(`Realtime SDP exchange failed (${sdpResp.status}): ${sdpText}`);
+          throw new Error(`Realtime failed ${sdpResp.status}: ${sdpText}`);
         }
 
         await pc.setRemoteDescription({ type: "answer", sdp: sdpText });
         setStatus("Live");
+
       } catch (err) {
         console.error(err);
-        setStatus("ERROR: " + (err?.message || String(err)));
+        setStatus("ERROR: " + (err.message || err));
         startBtn.disabled = false;
         stopBtn.disabled = true;
       }
     }
 
-    async function stopSubtitles(){
-      try{
+    // =========================
+    // STOP
+    // =========================
+    async function stopSubtitles() {
+      try {
         setStatus("Stopping…");
         stopBtn.disabled = true;
 
-        if (dc) { try { dc.close(); } catch {} dc = null; }
-        if (pc) { try { pc.close(); } catch {} pc = null; }
-
+        if (dc) { dc.close(); dc = null; }
+        if (pc) { pc.close(); pc = null; }
         if (localStream) {
-          localStream.getTracks().forEach(t => { try { t.stop(); } catch {} });
+          localStream.getTracks().forEach(t => t.stop());
           localStream = null;
         }
 
@@ -242,13 +255,11 @@
       }
     }
 
-    // ========================
-    // BUTTONS (guaranteed)
-    // ========================
-    startBtn.onclick = () => startSubtitles();
-    stopBtn.onclick  = () => stopSubtitles();
-
-    // prove script is running
+    // =========================
+    // BUTTONS
+    // =========================
+    startBtn.onclick = startSubtitles;
+    stopBtn.onclick  = stopSubtitles;
     setStatus("Ready");
   </script>
 </body>
