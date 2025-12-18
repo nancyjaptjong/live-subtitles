@@ -191,10 +191,12 @@
 
         setStatus("Live");
       } catch (err) {
-        console.error(err);
-        setStatus("Error (check console)");
-        startBtn.disabled = false;
-        stopBtn.disabled = true;
+  console.error(err);
+  setStatus("ERROR: " + (err?.message || String(err)));
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+}
+
       }
     }
 
@@ -224,3 +226,4 @@
   </script>
 </body>
 </html>
+
