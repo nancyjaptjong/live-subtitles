@@ -1,4 +1,5 @@
 export async function onRequest(context) {
+  // CORS preflight
   if (context.request.method === "OPTIONS") {
     return new Response(null, {
       status: 204,
@@ -46,10 +47,27 @@ export async function onRequest(context) {
     });
   }
 
-  const prompt =
-    "Translate the following Dutch into Papiamentu.\n" +
-    "Return ONLY the Papiamentu translation. No quotes. No extra text.\n\n" +
-    "Dutch:\n" + dutch;
+  // 🔒 Strong, dialect-stable instruction + a few examples.
+  // If you want Curaçao vs Aruba style, tell me which and I’ll tune the examples/spelling.
+  const system = `
+You are a professional subtitle translator.
+Translate from DUTCH to PAPIAMENTU.
+Output ONLY the Papiamentu subtitle text. No quotes. No extra commentary.
+Keep it short, natural, and spoken.
+Preserve names/places/brands. If a term is unknown, keep it as-is.
+Use consistent Papiamentu spelling and grammar.
+`;
+
+  const examples = `
+Examples (Dutch -> Papiamentu):
+- "Goedemorgen, hoe gaat het?" -> "Bon dia, kon ta bai?"
+- "Dank je wel!" -> "Masha danki!"
+- "Tot straks." -> "Te awor aki."
+- "Ik begrijp het niet." -> "Mi no ta komprondé."
+- "Kun je dat herhalen?" -> "Bo por repetí esey?"
+`;
+
+  const user = `Translate this Dutch sentence into Papiamentu:\n${dutch}\n\n${examples}`;
 
   const r = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -58,9 +76,13 @@ export async function onRequest(context) {
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "gpt-4o-mini",
-      input: prompt,
-      temperature: 0.2,
+      model: "gpt-4o",
+      temperature: 0,
+      input: [
+        { role: "system", content: system.trim() },
+        { role: "user", content: user }
+      ],
+      max_output_tokens: 120
     }),
   });
 
@@ -73,6 +95,7 @@ export async function onRequest(context) {
     });
   }
 
+  // Extract text from Responses API
   let out = "";
   try {
     const parts = json.output?.[0]?.content || [];
