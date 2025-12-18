@@ -49,7 +49,7 @@
     <div>
       <h1 style="margin:0 0 8px;">Live Dutch → Papiamentu Subtitles</h1>
       <p style="margin:0; opacity:.8;">
-        Click <b>Start</b>. Speak Dutch. The subtitle will show Papiamentu.
+        Click <b>Start</b>. Speak Dutch. Subtitle should appear in <b>Papiamentu</b>.
       </p>
       <p style="margin:12px 0 0; opacity:.7; font-size:14px;">
         Presentation mode: <code>?presentation=true</code>
@@ -66,8 +66,14 @@
   <script>
     // ========= Config =========
     const TOKEN_ENDPOINT = "/token";
-    const MODEL = "gpt-realtime";
     const DUTCH_LOCALE = "nl-NL";
+
+    // Hard rule used in BOTH session + per-request prompts:
+    const RULES =
+      "You are a subtitle translator. Input is DUTCH. " +
+      "Output MUST be PAPIAMENTU ONLY. " +
+      "Do NOT repeat Dutch. Do NOT explain. " +
+      "Return only the translated subtitle text.";
 
     // Presentation mode
     const params = new URLSearchParams(location.search);
@@ -106,33 +112,23 @@
 
     // ========= OpenAI Realtime (WebRTC) =========
     async function connectRealtimeWithMic(){
-      // 1) ephemeral key
       const EPHEMERAL_KEY = await getEphemeralKey();
 
-      // 2) Create peer connection
       pc = new RTCPeerConnection();
 
-      // 3) IMPORTANT: Add mic audio track BEFORE creating offer
-      // This guarantees the SDP offer includes an audio media section (m=audio).
+      // Ensure offer has audio (required by OpenAI)
       micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       micStream.getTracks().forEach(track => pc.addTrack(track, micStream));
 
-      // 4) Data channel for events
       dc = pc.createDataChannel("oai-events");
 
       dc.onopen = () => {
         setStatus("Live");
-
-        const instructions =
-          "You are a live subtitle translator. " +
-          "You will receive Dutch text. " +
-          "Return ONLY the Papiamentu translation as a subtitle. " +
-          "No explanations. Keep it short and natural.";
-
+        // Set global session rules
         dc.send(JSON.stringify({
           type: "session.update",
           session: {
-            instructions,
+            instructions: RULES,
             modalities: ["text"]
           }
         }));
@@ -142,14 +138,20 @@
         const m = safeJsonParse(e.data);
         if (!m) return;
 
+        // Streaming delta text -> subtitle
         if (m.type === "response.output_text.delta" && typeof m.delta === "string") {
           setSubtitle((subtitleBar.textContent || "") + m.delta);
           return;
         }
-        if (m.type === "response.output_text.done" && typeof m.text === "string" && m.text.trim()) {
-          setSubtitle(m.text.trim());
+
+        // Final text
+        if (m.type === "response.output_text.done" && typeof m.text === "string") {
+          const txt = m.text.trim();
+          if (txt) setSubtitle(txt);
           return;
         }
+
+        // Alternate final shape
         if (m.type === "response.completed") {
           const t =
             m?.response?.output?.[0]?.content?.find?.(c => c.type === "output_text")?.text ||
@@ -159,7 +161,7 @@
         }
       };
 
-      // 5) SDP exchange
+      // SDP exchange
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
@@ -178,24 +180,36 @@
       await pc.setRemoteDescription({ type: "answer", sdp: sdpText });
     }
 
-    // ========= Send Dutch text to model =========
+    // ========= Send Dutch text to model (FORCE translation) =========
     function sendDutchForTranslation(dutchText){
       if (!dc || dc.readyState !== "open") return;
 
+      // Start clean for each subtitle line
       setSubtitle("");
+
+      // Very explicit user content
+      const prompt =
+        "Translate the following DUTCH into PAPIAMENTU.\n" +
+        "Output ONLY PAPIAMENTU.\n" +
+        "Do NOT repeat Dutch.\n\n" +
+        "DUTCH:\n" + dutchText;
 
       dc.send(JSON.stringify({
         type: "conversation.item.create",
         item: {
           type: "message",
           role: "user",
-          content: [{ type: "input_text", text: dutchText }]
+          content: [{ type: "input_text", text: prompt }]
         }
       }));
 
+      // Also enforce rules at response time (belt + suspenders)
       dc.send(JSON.stringify({
         type: "response.create",
-        response: { modalities: ["text"] }
+        response: {
+          modalities: ["text"],
+          instructions: RULES
+        }
       }));
     }
 
@@ -236,7 +250,7 @@
       };
 
       recognition.onend = () => {
-        // Chrome sometimes ends automatically; if still running, restart.
+        // Chrome can stop automatically; restart if still in "running" state
         if (startBtn.disabled) {
           try { recognition.start(); } catch {}
         }
@@ -254,7 +268,7 @@
         setDebug("");
         setStatus("Connecting…");
 
-        await connectRealtimeWithMic();     // ✅ now includes audio m-line
+        await connectRealtimeWithMic();
         startSpeechRecognition();
 
         setStatus("Live");
@@ -296,7 +310,6 @@
 
     startBtn.onclick = startAll;
     stopBtn.onclick = stopAll;
-
     setStatus("Ready");
   </script>
 </body>
