@@ -47,27 +47,37 @@ export async function onRequest(context) {
     });
   }
 
-  // 🔒 Strong, dialect-stable instruction + a few examples.
-  // If you want Curaçao vs Aruba style, tell me which and I’ll tune the examples/spelling.
+  // Curaçao/Bonaire Papiamentu uses diacritics and stress marks (Curaçao orthography). :contentReference[oaicite:1]{index=1}
   const system = `
-You are a professional subtitle translator.
-Translate from DUTCH to PAPIAMENTU.
-Output ONLY the Papiamentu subtitle text. No quotes. No extra commentary.
-Keep it short, natural, and spoken.
-Preserve names/places/brands. If a term is unknown, keep it as-is.
-Use consistent Papiamentu spelling and grammar.
+Bo ta un traduktor profesional pa subtítulonan.
+Tradusí di Hulandes (Dutch) pa Papiamentu di Kòrsou (Curaçao standard).
+Output: SOLAMENTE e tradukshon na Papiamentu (sin komenta, sin komiña, sin "Dutch:" label).
+Mantené e frase kortiku i natural manera un subtítulo.
+No repetí Hulandes.
+Preservá nòmber propio, lugánan, brand.
+Usa ortografia di Kòrsou ku aksèntnan ora mester (p.ej. è, ò, ù, ü) i aksènt di énfasis ora ta necesario. :contentReference[oaicite:2]{index=2}
 `;
 
+  // A few “anchor” examples in common Curaçao phrasing.
+  // (These are widely used forms in practice.) :contentReference[oaicite:3]{index=3}
   const examples = `
-Examples (Dutch -> Papiamentu):
+Ejèmpelnan (Hulandes -> Papiamentu di Kòrsou):
 - "Goedemorgen, hoe gaat het?" -> "Bon dia, kon ta bai?"
+- "Goedemiddag." -> "Bon tardi."
+- "Goedenavond." -> "Bon nochi."
 - "Dank je wel!" -> "Masha danki!"
-- "Tot straks." -> "Te awor aki."
+- "Tot later." -> "Te otro biaha."
 - "Ik begrijp het niet." -> "Mi no ta komprondé."
-- "Kun je dat herhalen?" -> "Bo por repetí esey?"
 `;
 
-  const user = `Translate this Dutch sentence into Papiamentu:\n${dutch}\n\n${examples}`;
+  const user = `
+${examples}
+
+Tradusí e siguiente frase di Hulandes pa Papiamentu di Kòrsou.
+Output SOLAMENTE Papiamentu:
+
+Hulandes: ${dutch}
+`.trim();
 
   const r = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
@@ -76,13 +86,13 @@ Examples (Dutch -> Papiamentu):
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "gpt-4o",
-      temperature: 0,
+      model: "gpt-4o",       // stronger for low-resource languages
+      temperature: 0,        // remove “creative” drift
+      max_output_tokens: 120,
       input: [
-        { role: "system", content: system.trim() },
-        { role: "user", content: user }
+        { role: "system", content: system },
+        { role: "user", content: user },
       ],
-      max_output_tokens: 120
     }),
   });
 
@@ -95,7 +105,7 @@ Examples (Dutch -> Papiamentu):
     });
   }
 
-  // Extract text from Responses API
+  // Extract text from Responses API output
   let out = "";
   try {
     const parts = json.output?.[0]?.content || [];
