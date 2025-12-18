@@ -48,14 +48,12 @@
   <div class="page">
     <div>
       <h1 style="margin:0 0 8px;">Live Dutch → Papiamentu Subtitles</h1>
-      <p style="margin:0; opacity:.8;">
-        Click <b>Start</b>. Speak Dutch. Subtitle should appear in <b>Papiamentu</b>.
-      </p>
+      <p style="margin:0; opacity:.8;">Click <b>Start</b>, allow mic, speak Dutch.</p>
       <p style="margin:12px 0 0; opacity:.7; font-size:14px;">
         Presentation mode: <code>?presentation=true</code>
       </p>
       <p style="margin:12px 0 0; opacity:.7; font-size:14px;">
-        Tip: Chrome/Edge work best for Dutch speech recognition.
+        Tip: Chrome/Edge work best for Dutch SpeechRecognition.
       </p>
     </div>
   </div>
@@ -64,22 +62,12 @@
   <div id="subtitleBar"></div>
 
   <script>
-    // ========= Config =========
-    const TOKEN_ENDPOINT = "/token";
     const DUTCH_LOCALE = "nl-NL";
+    const TRANSLATE_ENDPOINT = "/translate";
 
-    // Hard rule used in BOTH session + per-request prompts:
-    const RULES =
-      "You are a subtitle translator. Input is DUTCH. " +
-      "Output MUST be PAPIAMENTU ONLY. " +
-      "Do NOT repeat Dutch. Do NOT explain. " +
-      "Return only the translated subtitle text.";
-
-    // Presentation mode
     const params = new URLSearchParams(location.search);
     if (params.get("presentation") === "true") document.body.classList.add("presentation");
 
-    // ========= UI =========
     const startBtn = document.getElementById("startBtn");
     const stopBtn  = document.getElementById("stopBtn");
     const statusEl = document.getElementById("status");
@@ -90,140 +78,36 @@
     const setSubtitle = (t) => subtitleBar.textContent = t || "";
     const setDebug = (t) => debugBar.textContent = t || "";
 
-    const safeJsonParse = (s) => { try { return JSON.parse(s); } catch { return null; } };
-
-    // ========= State =========
-    let pc = null;
-    let dc = null;
     let recognition = null;
     let lastFinalDutch = "";
-    let micStream = null;
+    let busy = false;
 
-    // ========= Token =========
-    async function getEphemeralKey(){
-      const r = await fetch(TOKEN_ENDPOINT, { cache: "no-store" });
-      const t = await r.text();
-      if (!r.ok) throw new Error(`Token error ${r.status}: ${t}`);
-      const j = safeJsonParse(t);
-      const key = j?.value ?? j?.client_secret?.value;
-      if (!key) throw new Error("No ephemeral key returned from /token");
-      return key;
-    }
-
-    // ========= OpenAI Realtime (WebRTC) =========
-    async function connectRealtimeWithMic(){
-      const EPHEMERAL_KEY = await getEphemeralKey();
-
-      pc = new RTCPeerConnection();
-
-      // Ensure offer has audio (required by OpenAI)
-      micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      micStream.getTracks().forEach(track => pc.addTrack(track, micStream));
-
-      dc = pc.createDataChannel("oai-events");
-
-      dc.onopen = () => {
-        setStatus("Live");
-        // Set global session rules
-        dc.send(JSON.stringify({
-          type: "session.update",
-          session: {
-            instructions: RULES,
-            modalities: ["text"]
-          }
-        }));
-      };
-
-      dc.onmessage = (e) => {
-        const m = safeJsonParse(e.data);
-        if (!m) return;
-
-        // Streaming delta text -> subtitle
-        if (m.type === "response.output_text.delta" && typeof m.delta === "string") {
-          setSubtitle((subtitleBar.textContent || "") + m.delta);
-          return;
-        }
-
-        // Final text
-        if (m.type === "response.output_text.done" && typeof m.text === "string") {
-          const txt = m.text.trim();
-          if (txt) setSubtitle(txt);
-          return;
-        }
-
-        // Alternate final shape
-        if (m.type === "response.completed") {
-          const t =
-            m?.response?.output?.[0]?.content?.find?.(c => c.type === "output_text")?.text ||
-            m?.response?.output_text ||
-            null;
-          if (typeof t === "string" && t.trim()) setSubtitle(t.trim());
-        }
-      };
-
-      // SDP exchange
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-
-      const sdpResp = await fetch("https://api.openai.com/v1/realtime/calls", {
+    async function translateDutch(dutchText) {
+      const r = await fetch(TRANSLATE_ENDPOINT, {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${EPHEMERAL_KEY}`,
-          "Content-Type": "application/sdp"
-        },
-        body: offer.sdp
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: dutchText })
       });
 
-      const sdpText = await sdpResp.text();
-      if (!sdpResp.ok) throw new Error(`Realtime failed ${sdpResp.status}: ${sdpText}`);
-
-      await pc.setRemoteDescription({ type: "answer", sdp: sdpText });
+      const data = await r.json().catch(() => null);
+      if (!r.ok) {
+        throw new Error(`Translate error (${r.status}): ${JSON.stringify(data)}`);
+      }
+      const t = data?.translation?.toString()?.trim();
+      if (!t) throw new Error("Empty translation");
+      return t;
     }
 
-    // ========= Send Dutch text to model (FORCE translation) =========
-    function sendDutchForTranslation(dutchText){
-      if (!dc || dc.readyState !== "open") return;
-
-      // Start clean for each subtitle line
-      setSubtitle("");
-
-      // Very explicit user content
-      const prompt =
-        "Translate the following DUTCH into PAPIAMENTU.\n" +
-        "Output ONLY PAPIAMENTU.\n" +
-        "Do NOT repeat Dutch.\n\n" +
-        "DUTCH:\n" + dutchText;
-
-      dc.send(JSON.stringify({
-        type: "conversation.item.create",
-        item: {
-          type: "message",
-          role: "user",
-          content: [{ type: "input_text", text: prompt }]
-        }
-      }));
-
-      // Also enforce rules at response time (belt + suspenders)
-      dc.send(JSON.stringify({
-        type: "response.create",
-        response: {
-          modalities: ["text"],
-          instructions: RULES
-        }
-      }));
-    }
-
-    // ========= Browser SpeechRecognition (Dutch) =========
-    function startSpeechRecognition(){
+    function startSpeech() {
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-      if (!SR) throw new Error("SpeechRecognition not supported. Use Chrome or Edge on desktop.");
+      if (!SR) throw new Error("SpeechRecognition not supported. Use Chrome or Edge.");
 
       recognition = new SR();
       recognition.lang = DUTCH_LOCALE;
       recognition.continuous = true;
       recognition.interimResults = true;
 
-      recognition.onresult = (event) => {
+      recognition.onresult = async (event) => {
         let interim = "";
         let finalText = "";
 
@@ -237,10 +121,25 @@
         if (interim.trim()) setDebug("Dutch (listening): " + interim.trim());
 
         const cleaned = finalText.trim();
-        if (cleaned && cleaned !== lastFinalDutch) {
-          lastFinalDutch = cleaned;
-          setDebug("Dutch (final): " + cleaned);
-          sendDutchForTranslation(cleaned);
+        if (!cleaned || cleaned === lastFinalDutch) return;
+
+        lastFinalDutch = cleaned;
+        setDebug("Dutch (final): " + cleaned);
+
+        // prevent piling up requests if you speak fast
+        if (busy) return;
+        busy = true;
+
+        try {
+          setStatus("Translating…");
+          const pap = await translateDutch(cleaned);
+          setSubtitle(pap);
+          setStatus("Live");
+        } catch (e) {
+          console.error(e);
+          setStatus("ERROR: " + (e?.message || String(e)));
+        } finally {
+          busy = false;
         }
       };
 
@@ -250,7 +149,7 @@
       };
 
       recognition.onend = () => {
-        // Chrome can stop automatically; restart if still in "running" state
+        // auto-restart if user hasn't stopped
         if (startBtn.disabled) {
           try { recognition.start(); } catch {}
         }
@@ -259,53 +158,37 @@
       recognition.start();
     }
 
-    // ========= Start / Stop =========
-    async function startAll(){
-      try{
+    function stopSpeech() {
+      if (recognition) {
+        try { recognition.onend = null; } catch {}
+        try { recognition.stop(); } catch {}
+        recognition = null;
+      }
+    }
+
+    async function startAll() {
+      try {
         startBtn.disabled = true;
         stopBtn.disabled = false;
         setSubtitle("");
         setDebug("");
-        setStatus("Connecting…");
-
-        await connectRealtimeWithMic();
-        startSpeechRecognition();
-
+        setStatus("Listening…");
+        startSpeech();
         setStatus("Live");
-      } catch (err) {
-        console.error(err);
-        setStatus("ERROR: " + (err?.message || String(err)));
+      } catch (e) {
+        console.error(e);
+        setStatus("ERROR: " + (e?.message || String(e)));
         startBtn.disabled = false;
         stopBtn.disabled = true;
       }
     }
 
-    async function stopAll(){
-      try{
-        setStatus("Stopping…");
-        stopBtn.disabled = true;
-
-        if (recognition) {
-          try { recognition.onend = null; } catch {}
-          try { recognition.stop(); } catch {}
-          recognition = null;
-        }
-
-        if (dc) { try { dc.close(); } catch {} dc = null; }
-        if (pc) { try { pc.close(); } catch {} pc = null; }
-
-        if (micStream) {
-          micStream.getTracks().forEach(t => { try { t.stop(); } catch {} });
-          micStream = null;
-        }
-
-        setSubtitle("");
-        setDebug("");
-        setStatus("Idle");
-      } finally {
-        startBtn.disabled = false;
-        stopBtn.disabled = true;
-      }
+    async function stopAll() {
+      stopBtn.disabled = true;
+      stopSpeech();
+      setStatus("Idle");
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
     }
 
     startBtn.onclick = startAll;
