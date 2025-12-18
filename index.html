@@ -5,61 +5,36 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Live Dutch → Papiamentu Subtitles</title>
   <style>
-    body {
-      margin: 0;
-      font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    .topbar{
+      position:fixed; top:0; left:0; right:0;
+      padding:12px 16px; background:#111; color:#fff;
+      display:flex; gap:10px; align-items:center; z-index:10000;
     }
-    .topbar {
-      position: fixed;
-      top: 0; left: 0; right: 0;
-      padding: 12px 16px;
-      background: #111;
-      color: #fff;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      z-index: 10000;
+    button{ padding:10px 14px; font-size:16px; cursor:pointer; }
+    button:disabled{ opacity:.55; cursor:not-allowed; }
+    .status{ margin-left:auto; }
+    .page{
+      padding-top:64px; min-height:calc(100vh - 64px);
+      display:flex; align-items:center; justify-content:center;
+      text-align:center; color:#333;
     }
-    button {
-      padding: 10px 14px;
-      font-size: 16px;
-      cursor: pointer;
+    #subtitleBar{
+      position:fixed; left:0; right:0; bottom:0;
+      padding:18px 24px; font-size:32px; line-height:1.2;
+      background:rgba(0,0,0,.75); color:#fff; text-align:center;
+      z-index:9999; min-height:56px; user-select:none;
+      white-space:pre-wrap;
     }
-    button:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
+    #debugBar{
+      position:fixed; left:0; right:0; bottom:86px;
+      padding:10px 14px; font-size:14px;
+      background:rgba(0,0,0,.55); color:#fff;
+      z-index:9998; white-space:pre-wrap;
     }
-    .status {
-      margin-left: auto;
-    }
-    .page {
-      padding-top: 64px;
-      min-height: calc(100vh - 64px);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      text-align: center;
-      color: #333;
-    }
-    #subtitleBar {
-      position: fixed;
-      left: 0; right: 0; bottom: 0;
-      padding: 18px 24px;
-      font-size: 32px;
-      line-height: 1.2;
-      background: rgba(0,0,0,0.75);
-      color: #fff;
-      text-align: center;
-      z-index: 9999;
-      min-height: 56px;
-      user-select: none;
-      white-space: pre-wrap;
-    }
-    body.presentation .topbar { display: none; }
-    body.presentation .page {
-      padding-top: 0;
-      min-height: 100vh;
-    }
+    body.presentation .topbar { display:none; }
+    body.presentation .page { padding-top:0; min-height:100vh; }
+    body.presentation #debugBar { display:none; }
   </style>
 </head>
 
@@ -72,182 +47,238 @@
 
   <div class="page">
     <div>
-      <h1>Live Dutch → Papiamentu Subtitles</h1>
-      <p>Click <b>Start</b>, allow microphone, then speak Dutch.</p>
-      <p style="opacity:.7;font-size:14px;">
-        Presentation mode: add <code>?presentation=true</code>
+      <h1 style="margin:0 0 8px;">Live Dutch → Papiamentu Subtitles</h1>
+      <p style="margin:0; opacity:.8;">
+        Click <b>Start</b>. Speak Dutch. The subtitle will show Papiamentu.
+      </p>
+      <p style="margin:12px 0 0; opacity:.7; font-size:14px;">
+        Presentation mode: <code>?presentation=true</code>
+      </p>
+      <p style="margin:12px 0 0; opacity:.7; font-size:14px;">
+        Note: This uses your browser’s Dutch speech recognition (Chrome/Edge work best).
       </p>
     </div>
   </div>
 
+  <div id="debugBar"></div>
   <div id="subtitleBar"></div>
 
   <script>
-    // =========================
-    // CONFIG
-    // =========================
+    // ========= Config =========
     const TOKEN_ENDPOINT = "/token";
-    const SOURCE_LANGUAGE = "nl";
+    const MODEL = "gpt-realtime"; // matches your token function
+    const DUTCH_LOCALE = "nl-NL";
 
     // Presentation mode
     const params = new URLSearchParams(location.search);
-    if (params.get("presentation") === "true") {
-      document.body.classList.add("presentation");
-    }
+    if (params.get("presentation") === "true") document.body.classList.add("presentation");
 
-    // =========================
-    // UI
-    // =========================
+    // ========= UI =========
     const startBtn = document.getElementById("startBtn");
     const stopBtn  = document.getElementById("stopBtn");
     const statusEl = document.getElementById("status");
     const subtitleBar = document.getElementById("subtitleBar");
+    const debugBar = document.getElementById("debugBar");
 
-    function setStatus(msg) {
-      statusEl.textContent = msg;
-    }
+    const setStatus = (m) => statusEl.textContent = m;
+    const setSubtitle = (t) => subtitleBar.textContent = t || "";
+    const setDebug = (t) => debugBar.textContent = t || "";
 
-    function setSubtitle(text) {
-      subtitleBar.textContent = text || "";
-    }
+    const safeJsonParse = (s) => { try { return JSON.parse(s); } catch { return null; } };
 
-    function safeJsonParse(s) {
-      try { return JSON.parse(s); } catch { return null; }
-    }
-
-    // =========================
-    // STATE
-    // =========================
+    // ========= State =========
     let pc = null;
     let dc = null;
-    let localStream = null;
+    let recognition = null;
+    let lastFinalDutch = "";
 
-    // =========================
-    // TOKEN
-    // =========================
-    async function getEphemeralKey() {
+    // ========= Token =========
+    async function getEphemeralKey(){
       const r = await fetch(TOKEN_ENDPOINT, { cache: "no-store" });
       const t = await r.text();
       if (!r.ok) throw new Error(`Token error ${r.status}: ${t}`);
       const j = safeJsonParse(t);
       const key = j?.value ?? j?.client_secret?.value;
-      if (!key) throw new Error("No ephemeral key returned");
+      if (!key) throw new Error("No ephemeral key returned from /token");
       return key;
     }
 
-    // =========================
-    // START
-    // =========================
-    async function startSubtitles() {
-      try {
+    // ========= OpenAI Realtime (data channel) =========
+    async function connectRealtime(){
+      const EPHEMERAL_KEY = await getEphemeralKey();
+
+      pc = new RTCPeerConnection();
+      dc = pc.createDataChannel("oai-events");
+
+      dc.onopen = () => {
+        setStatus("Live");
+        // Tell the model exactly what we want.
+        dc.send(JSON.stringify({
+          type: "session.update",
+          session: {
+            instructions:
+              "You are a live subtitle translator. " +
+              "You will receive Dutch text. " +
+              "Return ONLY the Papiamentu translation as a subtitle. " +
+              "No explanations. Keep it short and natural.",
+            modalities: ["text"]
+          }
+        }));
+      };
+
+      dc.onmessage = (e) => {
+        const m = safeJsonParse(e.data);
+        if (!m) return;
+
+        // Stream subtitle text (delta)
+        if (m.type === "response.output_text.delta" && typeof m.delta === "string") {
+          setSubtitle((subtitleBar.textContent || "") + m.delta);
+          return;
+        }
+
+        // Final subtitle
+        if (m.type === "response.output_text.done") {
+          if (typeof m.text === "string" && m.text.trim()) setSubtitle(m.text.trim());
+          return;
+        }
+
+        // Alternate final shape
+        if (m.type === "response.completed") {
+          const t =
+            m?.response?.output?.[0]?.content?.find?.(c => c.type === "output_text")?.text ||
+            m?.response?.output_text ||
+            null;
+          if (typeof t === "string" && t.trim()) setSubtitle(t.trim());
+        }
+      };
+
+      // SDP offer/answer
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      const sdpResp = await fetch("https://api.openai.com/v1/realtime/calls", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${EPHEMERAL_KEY}`,
+          "Content-Type": "application/sdp"
+        },
+        body: offer.sdp
+      });
+
+      const sdpText = await sdpResp.text();
+      if (!sdpResp.ok) throw new Error(`Realtime failed ${sdpResp.status}: ${sdpText}`);
+      await pc.setRemoteDescription({ type: "answer", sdp: sdpText });
+    }
+
+    // ========= Send Dutch text to model =========
+    function sendDutchForTranslation(dutchText){
+      if (!dc || dc.readyState !== "open") return;
+
+      // Clear subtitle bar so new subtitle starts clean
+      setSubtitle("");
+
+      // Create a user message in the conversation
+      dc.send(JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: dutchText }]
+        }
+      }));
+
+      // Ask for a text response (subtitle)
+      dc.send(JSON.stringify({
+        type: "response.create",
+        response: { modalities: ["text"] }
+      }));
+    }
+
+    // ========= Browser SpeechRecognition (Dutch) =========
+    function startSpeechRecognition(){
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SR) {
+        throw new Error("SpeechRecognition not supported. Use Chrome or Edge on desktop.");
+      }
+
+      recognition = new SR();
+      recognition.lang = DUTCH_LOCALE;
+      recognition.continuous = true;
+      recognition.interimResults = true;
+
+      recognition.onresult = (event) => {
+        let interim = "";
+        let finalText = "";
+
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const res = event.results[i];
+          const txt = res[0]?.transcript || "";
+          if (res.isFinal) finalText += txt;
+          else interim += txt;
+        }
+
+        if (interim.trim()) setDebug("Dutch (listening): " + interim.trim());
+
+        const cleaned = finalText.trim();
+        if (cleaned && cleaned !== lastFinalDutch) {
+          lastFinalDutch = cleaned;
+          setDebug("Dutch (final): " + cleaned);
+          sendDutchForTranslation(cleaned);
+        }
+      };
+
+      recognition.onerror = (e) => {
+        console.error(e);
+        setStatus("ERROR: speech recognition (" + (e.error || "unknown") + ")");
+      };
+
+      recognition.onend = () => {
+        // Chrome sometimes ends automatically; if still running, restart.
+        if (startBtn.disabled) {
+          try { recognition.start(); } catch {}
+        }
+      };
+
+      recognition.start();
+    }
+
+    // ========= Start / Stop =========
+    async function startAll(){
+      try{
         startBtn.disabled = true;
         stopBtn.disabled = false;
         setSubtitle("");
-        setStatus("Requesting microphone…");
-
-        const EPHEMERAL_KEY = await getEphemeralKey();
-        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
+        setDebug("");
         setStatus("Connecting…");
 
-        pc = new RTCPeerConnection();
-        localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+        await connectRealtime();
+        startSpeechRecognition();
 
-        dc = pc.createDataChannel("oai-events");
-
-        dc.onopen = () => {
-          setStatus("Live");
-
-          const instructions =
-            "You are a live subtitle translator. " +
-            "Translate spoken Dutch into Papiamentu. " +
-            "Output ONLY the subtitle text.";
-
-          dc.send(JSON.stringify({
-            type: "session.update",
-            session: {
-              instructions,
-              input_audio_transcription: {
-                model: "gpt-4o-mini-transcribe",
-                language: SOURCE_LANGUAGE
-              },
-              modalities: ["text"]
-            }
-          }));
-
-          dc.send(JSON.stringify({
-            type: "response.create",
-            response: {
-              modalities: ["text"],
-              instructions: "Start translating now."
-            }
-          }));
-        };
-
-        dc.onmessage = (e) => {
-          const m = safeJsonParse(e.data);
-          if (!m) return;
-
-          if (m.type === "response.output_text.delta") {
-            setSubtitle(subtitleBar.textContent + (m.delta || ""));
-          }
-
-          if (m.type === "response.output_text.done" && m.text) {
-            setSubtitle(m.text.trim());
-          }
-
-          if (m.type === "response.completed") {
-            const t =
-              m?.response?.output?.[0]?.content?.find?.(c => c.type === "output_text")?.text;
-            if (t) setSubtitle(t.trim());
-          }
-        };
-
-        const offer = await pc.createOffer();
-        await pc.setLocalDescription(offer);
-
-        // ✅ CORRECT ENDPOINT
-        const sdpResp = await fetch("https://api.openai.com/v1/realtime/calls", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${EPHEMERAL_KEY}`,
-            "Content-Type": "application/sdp"
-          },
-          body: offer.sdp
-        });
-
-        const sdpText = await sdpResp.text();
-        if (!sdpResp.ok) {
-          throw new Error(`Realtime failed ${sdpResp.status}: ${sdpText}`);
-        }
-
-        await pc.setRemoteDescription({ type: "answer", sdp: sdpText });
         setStatus("Live");
-
       } catch (err) {
         console.error(err);
-        setStatus("ERROR: " + (err.message || err));
+        setStatus("ERROR: " + (err?.message || String(err)));
         startBtn.disabled = false;
         stopBtn.disabled = true;
       }
     }
 
-    // =========================
-    // STOP
-    // =========================
-    async function stopSubtitles() {
-      try {
+    async function stopAll(){
+      try{
         setStatus("Stopping…");
         stopBtn.disabled = true;
 
-        if (dc) { dc.close(); dc = null; }
-        if (pc) { pc.close(); pc = null; }
-        if (localStream) {
-          localStream.getTracks().forEach(t => t.stop());
-          localStream = null;
+        if (recognition) {
+          try { recognition.onend = null; } catch {}
+          try { recognition.stop(); } catch {}
+          recognition = null;
         }
 
+        if (dc) { try { dc.close(); } catch {} dc = null; }
+        if (pc) { try { pc.close(); } catch {} pc = null; }
+
         setSubtitle("");
+        setDebug("");
         setStatus("Idle");
       } finally {
         startBtn.disabled = false;
@@ -255,11 +286,10 @@
       }
     }
 
-    // =========================
-    // BUTTONS
-    // =========================
-    startBtn.onclick = startSubtitles;
-    stopBtn.onclick  = stopSubtitles;
+    // Wire buttons
+    startBtn.onclick = startAll;
+    stopBtn.onclick = stopAll;
+
     setStatus("Ready");
   </script>
 </body>
