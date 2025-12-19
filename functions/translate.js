@@ -1,3 +1,66 @@
+import wordlist from "../data/curacao_wordlist.json";
+
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function applyRules(text, rules, protectedSet) {
+  let out = text;
+
+  for (const rule of rules || []) {
+    const src = (rule?.src || "").toString();
+    const tgt = (rule?.tgt || "").toString();
+    if (!src) continue;
+
+    // Skip if src is protected
+    if (protectedSet.has(src)) continue;
+
+    const flags = rule.case_sensitive ? "g" : "gi";
+    const pattern = rule.word_boundary
+      ? `\\b${escapeRegex(src)}\\b`
+      : `${escapeRegex(src)}`;
+
+    const re = new RegExp(pattern, flags);
+    out = out.replace(re, tgt);
+  }
+  return out;
+}
+
+function protectTokens(text, protectedList) {
+  // Replace protected tokens with placeholders so other rules can't modify them
+  const map = new Map();
+  let out = text;
+
+  (protectedList || []).forEach((token, i) => {
+    const t = (token || "").toString();
+    if (!t) return;
+
+    const key = `__PROTECTED_${i}__`;
+    map.set(key, t);
+
+    // Replace all occurrences (case-sensitive, exact)
+    // If you want case-insensitive protection, tell me and I’ll adjust.
+    out = out.split(t).join(key);
+  });
+
+  return { text: out, map };
+}
+
+function unprotectTokens(text, map) {
+  let out = text;
+  for (const [key, val] of map.entries()) {
+    out = out.split(key).join(val);
+  }
+  return out;
+}
+
+function normalizeSpacing(s) {
+  return (s || "")
+    .replace(/\s+/g, " ")
+    .replace(/\s+([,.!?;:])/g, "$1")
+    .trim();
+}
+
 export async function onRequest(context) {
   // CORS preflight
   if (context.request.method === "OPTIONS") {
@@ -47,31 +110,30 @@ export async function onRequest(context) {
     });
   }
 
-  // Curaçao/Bonaire Papiamentu uses diacritics and stress marks (Curaçao orthography). :contentReference[oaicite:1]{index=1}
+  // --- Curaçao style translator instructions
   const system = `
 Bo ta un traduktor profesional pa subtítulonan.
 Tradusí di Hulandes (Dutch) pa Papiamentu di Kòrsou (Curaçao standard).
-Output: SOLAMENTE e tradukshon na Papiamentu (sin komenta, sin komiña, sin "Dutch:" label).
+Output: SOLAMENTE e tradukshon na Papiamentu (sin komenta, sin komiña).
 Mantené e frase kortiku i natural manera un subtítulo.
 No repetí Hulandes.
 Preservá nòmber propio, lugánan, brand.
-Usa ortografia di Kòrsou ku aksèntnan ora mester (p.ej. è, ò, ù, ü) i aksènt di énfasis ora ta necesario. :contentReference[oaicite:2]{index=2}
-`;
+Usa ortografia di Kòrsou ku aksèntnan ora mester (p.ej. è, ò, ù, ü).
+`.trim();
 
-  // A few “anchor” examples in common Curaçao phrasing.
-  // (These are widely used forms in practice.) :contentReference[oaicite:3]{index=3}
-  const examples = `
-Ejèmpelnan (Hulandes -> Papiamentu di Kòrsou):
-- "Goedemorgen, hoe gaat het?" -> "Bon dia, kon ta bai?"
-- "Goedemiddag." -> "Bon tardi."
-- "Goedenavond." -> "Bon nochi."
-- "Dank je wel!" -> "Masha danki!"
-- "Tot later." -> "Te otro biaha."
-- "Ik begrijp het niet." -> "Mi no ta komprondé."
-`;
+  // Helpful anchors pulled from your wordlist phrase targets (optional)
+  // (We keep this small so we don't “overfit”.)
+  const anchors = `
+Ejèmpelnan:
+- "goedemorgen" -> "bon dia"
+- "goedemiddag" -> "bon tardi"
+- "goedenavond" -> "bon nochi"
+- "hoe gaat het" -> "kon ta bai"
+- "dank je wel" -> "masha danki"
+`.trim();
 
   const user = `
-${examples}
+${anchors}
 
 Tradusí e siguiente frase di Hulandes pa Papiamentu di Kòrsou.
 Output SOLAMENTE Papiamentu:
@@ -79,6 +141,7 @@ Output SOLAMENTE Papiamentu:
 Hulandes: ${dutch}
 `.trim();
 
+  // Call OpenAI Responses API
   const r = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
     headers: {
@@ -86,13 +149,13 @@ Hulandes: ${dutch}
       "Content-Type": "application/json",
     },
     body: JSON.stringify({
-      model: "gpt-4o",       // stronger for low-resource languages
-      temperature: 0,        // remove “creative” drift
-      max_output_tokens: 120,
+      model: "gpt-4o",
+      temperature: 0,
+      max_output_tokens: 140,
       input: [
         { role: "system", content: system },
-        { role: "user", content: user },
-      ],
+        { role: "user", content: user }
+      ]
     }),
   });
 
@@ -123,8 +186,28 @@ Hulandes: ${dutch}
     });
   }
 
-  return new Response(JSON.stringify({ translation: out }), {
+  // --- Apply your wordlist deterministically
+  const protectedList = wordlist?.protected || [];
+  const protectedSet = new Set(protectedList.map(x => (x || "").toString()));
+
+  // Protect names/brands first
+  const protectedResult = protectTokens(out, protectedList);
+  let fixed = protectedResult.text;
+
+  // Apply in priority order
+  fixed = applyRules(fixed, wordlist?.phrases, protectedSet);
+  fixed = applyRules(fixed, wordlist?.words, protectedSet);
+  fixed = applyRules(fixed, wordlist?.spelling_fixes, protectedSet);
+
+  // Unprotect
+  fixed = unprotectTokens(fixed, protectedResult.map);
+
+  // Normalize whitespace/punctuation
+  fixed = normalizeSpacing(fixed);
+
+  return new Response(JSON.stringify({ translation: fixed }), {
     status: 200,
     headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
   });
 }
+
