@@ -176,6 +176,13 @@
   "tgt": "hende",
   "case_sensitive": false,
   "word_boundary": true
+},
+{
+  "id": "s025",
+  "src": "kmio",
+  "tgt": "kiko",
+  "case_sensitive": false,
+  "word_boundary": true
 }
 ]
 }
